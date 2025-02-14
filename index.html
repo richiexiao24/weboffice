@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebOffice 在线编辑预览 Demo</title>
+    <!-- 引入 Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f2f5;
+        }
+
+    .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            padding: 20px;
+        }
+
+        h1 {
+            color: #1a73e8;
+            text-align: left;
+            margin-bottom: 30px;
+            font-size: 24px;
+            padding-left: 10px;
+            display: flex;
+            align-items: center;
+        }
+
+        h1 i {
+            margin-right: 10px;
+            font-size: 28px;
+            color: #1a73e8;
+        }
+
+        /* 新增样式，缩小标题区域图片 */
+        h1 img {
+            max-width: 200px;
+            height: auto;
+        }
+
+    .description {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            flex-direction: row;
+            justify-content: space-between;
+        }
+
+    .description.text {
+            flex: 1;
+            padding-right: 15px;
+        }
+
+    .description img {
+            width: 300px;
+            height: auto;
+            border-radius: 6px;
+        }
+
+    .description ul {
+            list-style: none;
+            padding: 0;
+        }
+
+    .description li {
+            margin: 10px 0;
+            display: flex;
+            align-items: center;
+        }
+
+    .description li i {
+            margin-right: 10px;
+            color: #1a73e8;
+        }
+
+    .file-list {
+            margin-bottom: 20px;
+        }
+
+    .file-list ul {
+            list-style: none;
+            padding: 0;
+        }
+
+    .file-list li {
+            margin: 10px 0;
+        }
+
+    .file-list input[type="checkbox"] {
+            margin-right: 10px;
+        }
+
+    .btn-group {
+            margin: 20px 0;
+            text-align: center;
+        }
+
+        button {
+            background: #1a73e8;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 0 5px;
+        }
+
+        button:hover {
+            background: #1557b0;
+        }
+
+    .notice {
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 20px;
+            text-align: center;
+        }
+
+    .description li i {
+            margin-right: 5px;
+            vertical-align: baseline;
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            text-align: center;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <!-- 标题区域 -->
+        <h1>
+            <img src="https://osweb.solutions/site/assets/images/logo.svg" alt="WebOffice 图片">
+            DEMO
+        </h1>
+
+        <!-- 描述区域 -->
+        <div class="description">
+            <div class="text">
+                <p>这是一个在线文档编辑预览演示环境，支持以下功能：</p>
+                <ul>
+                    <li><i class="fas fa-pencil-ruler"></i> Word/Excel/PPT 在线编辑</li>
+                    <li><i class="fas fa-desktop"></i> 文档实时预览</li>
+                    <li><i class="fas fa-users"></i> 多人协作功能（需后端支持）</li>
+                    <li><i class="fas fa-expand-arrows-alt"></i> 全屏查看模式</li>
+                </ul>
+            </div>
+            <!-- 右侧图片 -->
+            <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQy8MbZrGVviCmQkWmHzbjgyr4OO4ThPwbmgQ&s" alt="WebOffice 图片">
+        </div>
+
+        <!-- 文件列表 -->
+        <div class="file-list" id="fileList">
+            <h2>文件列表</h2>
+            <ul>
+                <li><input type="checkbox" id="file1" value="demo.docx"><label for="file1">示例文档 1 (demo.docx)</label></li>
+                <li><input type="checkbox" id="file2" value="sample.xlsx"><label for="file2">示例表格 (sample.xlsx)</label></li>
+                <li><input type="checkbox" id="file3" value="presentation.pptx"><label for="file3">示例演示文稿 (presentation.pptx)</label></li>
+            </ul>
+        </div>
+
+        <!-- 操作按钮 -->
+        <div class="btn-group">
+            <button onclick="openEditor('edit')">编辑模式</button>
+            <button onclick="openEditor('view')">预览模式</button>
+        </div>
+
+        <p class="notice">
+            注意：本演示环境使用模拟数据，实际使用时需要接入WebOffice SDK和后端服务<br>
+            支持文件格式：docx, xlsx, pptx, pdf 等常见办公格式
+        </p>
+    </div>
+
+    <script>
+        // 获取用户选择的文件
+        function getSelectedFile() {
+            const checkboxes = document.querySelectorAll('.file-list input[type="checkbox"]');
+            for (const checkbox of checkboxes) {
+                if (checkbox.checked) {
+                    return checkbox.value; // 返回选中的文件值
+                }
+            }
+            alert("请先选择一个文件！");
+            return null;
+        }
+
+        // 打开编辑器页面
+        function openEditor(mode) {
+            const selectedFile = getSelectedFile();
+            if (!selectedFile) return;
+
+            // 跳转到 editor.html 并传递参数
+            window.location.href = `editor.html?fileId=${selectedFile}&mode=${mode}`;
+        }
+    </script>
+</body>
+
+</html>

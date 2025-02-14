@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文档编辑器</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f2f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+        .editor-container {
+            width: 100%;
+            height: 600px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .btn-group {
+            margin: 20px 0;
+            text-align: center;
+        }
+        button {
+            background: #1a73e8;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 0 5px;
+        }
+        button:hover {
+            background: #1557b0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="btn-group">
+            <button onclick="toggleFullscreen()">全屏查看</button>
+            <button onclick="window.history.back()">返回文件列表</button>
+        </div>
+        <div class="editor-container">
+            <iframe id="officeFrame"
+                    frameborder="0"
+                    style="width:100%;height:100%">
+            </iframe>
+        </div>
+    </div>
+
+    <script>
+        // 从 URL 参数中获取文件信息
+        const urlParams = new URLSearchParams(window.location.search);
+        const fileId = urlParams.get('fileId');
+        const mode = urlParams.get('mode');
+
+        // 加载编辑器
+        if (fileId && mode) {
+            const baseUrl = "https://example.com/weboffice/editor"; // 替换为实际的 WebOffice 服务地址
+            document.getElementById('officeFrame').src =
+                `${baseUrl}?fileId=${fileId}&mode=${mode}`;
+        } else {
+            alert("参数错误！正在返回文件列表...");
+            window.location.href = 'index.html';
+        }
+
+        // 全屏功能
+        function toggleFullscreen() {
+            const elem = document.querySelector('.editor-container');
+            if (!document.fullscreenElement) {
+                elem.requestFullscreen().catch(err => {
+                    alert(`全屏请求失败: ${err.message}`);
+                });
+            } else {
+                document.exitFullscreen();
+            }
+        }
+    </script>
+</body>
+</html>
