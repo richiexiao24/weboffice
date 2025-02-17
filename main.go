@@ -13,6 +13,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+
+	"gorm.io/gorm/clause" // 新增引用
 )
 
 // ---------------------------
@@ -572,20 +574,44 @@ func registerRoutes(r *gin.Engine) {
 }
 
 // ---------------------------
-// 测试数据初始化（带错误处理）
+// 测试数据初始化（增强版：幂等性设计）
 // ---------------------------
 func initTestData() error {
 	return db.Transaction(func(tx *gorm.DB) error {
-		// 初始化用户
-		if err := tx.Create(&User{
+		// 清理旧测试数据（关键修改点）
+		if err := tx.Exec("DELETE FROM users WHERE id = ?", "user1").Error; err != nil {
+			return fmt.Errorf("清理用户数据失败: %w", err)
+		}
+
+		if err := tx.Exec("DELETE FROM files WHERE id = ?", "file123").Error; err != nil {
+			return fmt.Errorf("清理文件数据失败: %w", err)
+		}
+
+		if err := tx.Exec("DELETE FROM watermarks WHERE file_id = ?", "file123").Error; err != nil {
+			return fmt.Errorf("清理水印数据失败: %w", err)
+		}
+
+		if err := tx.Exec("DELETE FROM attachments WHERE key = ?", "sample_key").Error; err != nil {
+			return fmt.Errorf("清理附件数据失败: %w", err)
+		}
+
+		// 初始化用户（使用 Clauses 处理冲突）
+		user := User{
 			ID:        "user1",
 			Name:      "Admin",
 			AvatarURL: "https://example.com/avatar.jpg",
-		}).Error; err != nil {
-			return err
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "id"}}, // 根据主键判断冲突
+			DoUpdates: clause.Assignments(map[string]interface{}{ // 冲突时更新字段
+				"name":       user.Name,
+				"avatar_url": user.AvatarURL,
+			}),
+		}).Create(&user).Error; err != nil {
+			return fmt.Errorf("初始化用户失败: %w", err)
 		}
 
-		// 初始化主文件
+		// 初始化主文件（使用 Upsert）
 		now := time.Now().Unix()
 		file := File{
 			ID:         "file123",
@@ -597,28 +623,41 @@ func initTestData() error {
 			CreatorID:  "user1",
 			ModifierID: "user1",
 		}
-		if err := tx.Create(&file).Error; err != nil {
-			return err
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "id"}},
+			UpdateAll: true, // 冲突时更新所有字段
+		}).Create(&file).Error; err != nil {
+			return fmt.Errorf("初始化文件失败: %w", err)
 		}
 
-		// 初始化水印
-		if err := tx.Create(&Watermark{
+		// 初始化水印（使用 CreateOrUpdate 模式）
+		watermark := Watermark{
 			FileID:     "file123",
 			Type:       1,
 			Value:      "Confidential",
 			Horizontal: 50,
 			Vertical:   100,
-		}).Error; err != nil {
-			return err
+		}
+		if err := tx.Where(Watermark{FileID: "file123"}).
+			Assign(watermark). // 存在则更新，不存在则插入
+			FirstOrCreate(&watermark).Error; err != nil {
+			return fmt.Errorf("初始化水印失败: %w", err)
 		}
 
-		// 初始化示例附件
-		if err := tx.Create(&Attachment{
+		// 初始化附件（带数据校验）
+		attachment := Attachment{
 			Key:       "sample_key",
 			Data:      []byte("sample content"),
 			CreatedAt: now,
-		}).Error; err != nil {
-			return err
+		}
+		if len(attachment.Data) == 0 {
+			return errors.New("附件内容不能为空")
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "key"}},
+			DoNothing: true, // 冲突时不执行操作
+		}).Create(&attachment).Error; err != nil {
+			return fmt.Errorf("初始化附件失败: %w", err)
 		}
 
 		return nil
