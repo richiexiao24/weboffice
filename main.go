@@ -19,7 +19,7 @@ import (
 // 配置项（生产环境应使用环境变量）
 // ---------------------------
 const (
-	dbUser     = "root"
+	dbUser     = "webuser"
 	dbPassword = "Aa@123456"
 	dbHost     = "localhost"
 	dbPort     = "3306"
