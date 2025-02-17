@@ -591,7 +591,8 @@ func initTestData() error {
 			return fmt.Errorf("清理水印数据失败: %w", err)
 		}
 
-		if err := tx.Exec("DELETE FROM attachments WHERE key = ?", "sample_key").Error; err != nil {
+		// 修复点：使用反引号转义保留字 key
+		if err := tx.Exec("DELETE FROM attachments WHERE `key` = ?", "sample_key").Error; err != nil {
 			return fmt.Errorf("清理附件数据失败: %w", err)
 		}
 
@@ -653,9 +654,10 @@ func initTestData() error {
 		if len(attachment.Data) == 0 {
 			return errors.New("附件内容不能为空")
 		}
+		// 修复点：使用反引号转义保留字 key
 		if err := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "key"}},
-			DoNothing: true, // 冲突时不执行操作
+			Columns:   []clause.Column{{Name: "`key`"}}, // 转义保留字
+			DoNothing: true,                             // 冲突时不执行操作
 		}).Create(&attachment).Error; err != nil {
 			return fmt.Errorf("初始化附件失败: %w", err)
 		}
