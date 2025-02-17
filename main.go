@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,61 +16,64 @@ import (
 )
 
 // ---------------------------
-// 数据库配置
+// 配置项（生产环境应使用环境变量）
 // ---------------------------
 const (
 	dbUser     = "root"
 	dbPassword = "Aa@123456"
-	dbHost     = "120.78.90.3"
+	dbHost     = "localhost"
 	dbPort     = "3306"
 	dbName     = "weboffice"
+
+	storageBaseURL = "http://storage.example.com"
+	uploadEndpoint = "http://upload.example.com"
 )
 
 // ---------------------------
-// 数据库模型定义
+// 数据库模型（严格遵循JSON规范）
 // ---------------------------
 type File struct {
-	ID         string `gorm:"primaryKey;size:47"`
-	Name       string `gorm:"size:240"`
-	Version    int    `gorm:"not null"`
-	Size       int    `gorm:"not null"`
-	CreateTime int64  `gorm:"not null"`
-	ModifyTime int64  `gorm:"not null"`
-	CreatorID  string `gorm:"size:48;not null"`
-	ModifierID string `gorm:"size:48;not null"`
+	ID         string `gorm:"primaryKey;size:47" json:"id"`
+	Name       string `gorm:"size:240" json:"name"`
+	Version    int    `gorm:"not null" json:"version"`
+	Size       int    `gorm:"not null" json:"size"`
+	CreateTime int64  `gorm:"not null" json:"create_time"`
+	ModifyTime int64  `gorm:"not null" json:"modify_time"`
+	CreatorID  string `gorm:"size:48;not null" json:"creator_id"`
+	ModifierID string `gorm:"size:48;not null" json:"modifier_id"`
 }
 
 type FileVersion struct {
-	ID         string `gorm:"primaryKey;size:47"`
-	Version    int    `gorm:"not null"` // 修正：只保留ID作为主键
-	Name       string `gorm:"size:240"`
-	Size       int    `gorm:"not null"`
-	CreateTime int64  `gorm:"not null"`
-	ModifierID string `gorm:"size:48;not null"`
+	ID         string `gorm:"primaryKey;size:47" json:"id"`
+	Version    int    `gorm:"not null" json:"version"`
+	Name       string `gorm:"size:240" json:"name"`
+	Size       int    `gorm:"not null" json:"size"`
+	CreateTime int64  `gorm:"not null" json:"create_time"`
+	ModifierID string `gorm:"size:48;not null" json:"modifier_id"`
 }
 
 type User struct {
-	ID        string `gorm:"primaryKey;size:48"`
-	Name      string `gorm:"size:100"`
-	AvatarURL string `gorm:"size:200"`
-}
-
-type Attachment struct {
-	Key       string `gorm:"primaryKey;size:100"`
-	Data      []byte `gorm:"type:longblob"`
-	CreatedAt int64  `gorm:"not null"`
+	ID        string `gorm:"primaryKey;size:48" json:"id"`
+	Name      string `gorm:"size:100" json:"name"`
+	AvatarURL string `gorm:"size:200" json:"avatar_url,omitempty"`
 }
 
 type Watermark struct {
-	FileID     string `gorm:"primaryKey;size:47"`
-	Type       int    `gorm:"not null"`
-	Value      string `gorm:"size:200"`
-	Horizontal int    `gorm:"not null"`
-	Vertical   int    `gorm:"not null"`
+	FileID     string `gorm:"primaryKey;size:47" json:"file_id"`
+	Type       int    `gorm:"not null" json:"type"`
+	Value      string `gorm:"size:200" json:"value"`
+	Horizontal int    `gorm:"not null" json:"horizontal"`
+	Vertical   int    `gorm:"not null" json:"vertical"`
+}
+
+type Attachment struct {
+	Key       string `gorm:"primaryKey;size:100" json:"key"`
+	Data      []byte `gorm:"type:longblob" json:"-"`
+	CreatedAt int64  `gorm:"not null" json:"created_at"`
 }
 
 // ---------------------------
-// 全局变量
+// 全局上下文
 // ---------------------------
 var db *gorm.DB
 
@@ -78,120 +84,176 @@ type Response struct {
 }
 
 // ---------------------------
-// 数据库初始化
+// 数据库初始化（带连接池配置）
 // ---------------------------
 func initDB() error {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
 		dbUser, dbPassword, dbHost, dbPort, dbName)
 
 	var err error
-	db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{
+		PrepareStmt: true, // 开启预编译
+	})
+
 	if err != nil {
-		return fmt.Errorf("Failed to connect database: %w", err)
+		return fmt.Errorf("database connection failed: %w", err)
 	}
 
-	// 自动迁移表结构
-	err = db.AutoMigrate(&File{}, &FileVersion{}, &User{}, &Attachment{}, &Watermark{})
-	if err != nil {
-		return fmt.Errorf("AutoMigrate failed: %w", err)
+	sqlDB, _ := db.DB()
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetMaxOpenConns(100)
+	sqlDB.SetConnMaxLifetime(time.Hour)
+
+	if err := db.AutoMigrate(&File{}, &FileVersion{}, &User{}, &Watermark{}, &Attachment{}); err != nil {
+		return fmt.Errorf("database migration failed: %w", err)
 	}
 
 	return nil
 }
 
 // ---------------------------
-// 处理函数实现
+// 核心回调接口实现
 // ---------------------------
 
-// 获取文件信息
-func handleGetFileInfo(c *gin.Context) {
-	fileID := c.Param("file_id")
-	var file File
-	result := db.First(&file, "id =?", fileID)
-	if result.Error != nil {
-		c.JSON(http.StatusNotFound, Response{Code: 404, Message: "File not found"})
+// GET /v3/3rd/files/:file_id
+func handleGetFile(c *gin.Context) {
+	fileID := sanitizeID(c.Param("file_id"))
+	if fileID == "" {
+		respondError(c, 400, "Invalid file ID")
 		return
 	}
-	c.JSON(http.StatusOK, Response{Code: 0, Data: file})
+
+	var file File
+	if err := db.Where("id = ?", fileID).First(&file).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			respondError(c, 404, "File not found")
+		} else {
+			respondError(c, 500, "Database error")
+		}
+		return
+	}
+
+	// 强制一致性校验
+	if file.ID != fileID {
+		log.Printf("CRITICAL: File ID mismatch (request:%s db:%s)", fileID, file.ID)
+		respondError(c, 500, "Data inconsistency")
+		return
+	}
+
+	c.JSON(200, Response{
+		Code: 0,
+		Data: file,
+	})
 }
 
-// 获取文件下载地址
+// GET /v3/3rd/files/:file_id/download
 func handleGetDownloadURL(c *gin.Context) {
-	fileID := c.Param("file_id")
-	c.JSON(http.StatusOK, Response{
-		Code: 0,
-		Data: map[string]string{
-			"url": fmt.Sprintf("http://storage.example.com/files/%s", fileID),
-		},
-	})
-}
-
-// 获取文件权限
-func handleGetPermissions(c *gin.Context) {
-	fileID := c.Param("file_id")
-
-	// 查询文件信息
-	var file File
-	result := db.First(&file, "id = ?", fileID)
-	if result.Error != nil {
-		c.JSON(http.StatusOK, Response{
-			Code: 0,
-			Data: map[string]interface{}{
-				"read":     0,
-				"update":   0,
-				"download": 0,
-				"user_id":  "",
-			},
-		})
+	fileID := sanitizeID(c.Param("file_id"))
+	if fileID == "" {
+		respondError(c, 400, "Invalid file ID")
 		return
 	}
 
-	// 示例逻辑：文件创建者有完全权限
-	c.JSON(http.StatusOK, Response{
-		Code: 0,
-		Data: map[string]interface{}{
-			"read":     1,
-			"update":   1,
-			"download": 1,
-			"user_id":  file.CreatorID,
-		},
-	})
-}
-
-// 三阶段保存 - 准备上传
-func handlePrepareUpload(c *gin.Context) {
-	c.JSON(http.StatusOK, Response{
-		Code: 0,
-		Data: map[string]interface{}{
-			"digest_types": []string{"sha1"},
-		},
-	})
-}
-
-// 三阶段保存 - 获取上传地址
-func handleGetUploadAddress(c *gin.Context) {
-	c.JSON(http.StatusOK, Response{
+	c.JSON(200, Response{
 		Code: 0,
 		Data: map[string]string{
-			"url":    "http://upload.example.com/files",
-			"method": "PUT",
+			"url": fmt.Sprintf("%s/files/%s", storageBaseURL, fileID),
 		},
 	})
 }
 
-// 三阶段保存 - 完成上传
-func handleUploadComplete(c *gin.Context) {
-	fileID := c.Param("file_id")
+// GET /v3/3rd/files/:file_id/permission
+func handleGetPermissions(c *gin.Context) {
+	fileID := sanitizeID(c.Param("file_id"))
+	if fileID == "" {
+		respondError(c, 400, "Invalid file ID")
+		return
+	}
 
-	// 使用事务处理
+	var file File
+	if err := db.Where("id = ?", fileID).First(&file).Error; err != nil {
+		respondError(c, 404, "File not found")
+		return
+	}
+
+	c.JSON(200, Response{
+		Code: 0,
+		Data: map[string]interface{}{
+			"read":        1,
+			"update":      1,
+			"download":    1,
+			"user_id":     file.CreatorID,
+			"history":     1,
+			"copy":        1,
+			"print":       1,
+			"modifier_id": file.ModifierID,
+		},
+	})
+}
+
+// GET /v3/3rd/files/:file_id/upload/prepare
+func handlePrepareUpload(c *gin.Context) {
+	c.JSON(200, Response{
+		Code: 0,
+		Data: map[string]interface{}{
+			"digest_types": []string{"sha1", "md5"},
+		},
+	})
+}
+
+// POST /v3/3rd/files/:file_id/upload/address
+func handleGetUploadAddress(c *gin.Context) {
+	var req struct {
+		Name     string            `json:"name"`
+		Size     int               `json:"size"`
+		Digest   map[string]string `json:"digest"`
+		IsManual bool              `json:"is_manual"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, 400, "Invalid request body")
+		return
+	}
+
+	c.JSON(200, Response{
+		Code: 0,
+		Data: map[string]interface{}{
+			"url":    fmt.Sprintf("%s/upload", uploadEndpoint),
+			"method": "PUT",
+			"headers": map[string]string{
+				"Content-Type": "application/octet-stream",
+			},
+		},
+	})
+}
+
+// POST /v3/3rd/files/:file_id/upload/complete
+func handleUploadComplete(c *gin.Context) {
+	fileID := sanitizeID(c.Param("file_id"))
+	if fileID == "" {
+		respondError(c, 400, "Invalid file ID")
+		return
+	}
+
+	var req struct {
+		Request  map[string]interface{} `json:"request"`
+		Response map[string]interface{} `json:"response"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, 400, "Invalid request body")
+		return
+	}
+
+	// 使用事务处理版本更新
 	err := db.Transaction(func(tx *gorm.DB) error {
-		// 更新主文件
+		// 获取当前文件
 		var file File
-		if err := tx.First(&file, "id =?", fileID).Error; err != nil {
+		if err := tx.Where("id = ?", fileID).First(&file).Error; err != nil {
 			return err
 		}
 
-		// 创建新版本
+		// 创建新版本记录
 		newVersion := FileVersion{
 			ID:         fileID,
 			Version:    file.Version + 1,
@@ -200,12 +262,19 @@ func handleUploadComplete(c *gin.Context) {
 			CreateTime: time.Now().Unix(),
 			ModifierID: file.ModifierID,
 		}
+
 		if err := tx.Create(&newVersion).Error; err != nil {
 			return err
 		}
 
-		// 更新主文件版本
-		if err := tx.Model(&file).Update("version", newVersion.Version).Error; err != nil {
+		// 更新主文件
+		updateFields := map[string]interface{}{
+			"version":     newVersion.Version,
+			"modify_time": time.Now().Unix(),
+			"size":        req.Request["size"],
+		}
+
+		if err := tx.Model(&File{}).Where("id = ?", fileID).Updates(updateFields).Error; err != nil {
 			return err
 		}
 
@@ -213,179 +282,228 @@ func handleUploadComplete(c *gin.Context) {
 	})
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: fmt.Sprintf("Internal server error: %v", err)})
+		log.Printf("Upload complete failed: %v", err)
+		respondError(c, 500, "Failed to process upload")
 		return
 	}
 
-	c.JSON(http.StatusOK, Response{Code: 0})
+	c.JSON(200, Response{Code: 0})
 }
 
-// 获取用户信息
+// GET /v3/3rd/users
 func handleGetUsers(c *gin.Context) {
 	userIDs := c.QueryArray("user_ids")
 	if len(userIDs) == 0 {
-		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "user_ids parameter is required"})
+		respondError(c, 400, "Missing user_ids parameter")
 		return
 	}
 
 	var users []User
-	result := db.Where("id IN?", userIDs).Find(&users)
-	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, Response{Code: 500})
+	if err := db.Where("id IN (?)", userIDs).Find(&users).Error; err != nil {
+		respondError(c, 500, "Database error")
 		return
 	}
 
-	c.JSON(http.StatusOK, Response{Code: 0, Data: users})
+	c.JSON(200, Response{
+		Code: 0,
+		Data: users,
+	})
 }
 
-// 文件重命名
+// PUT /v3/3rd/files/:file_id/name
 func handleRenameFile(c *gin.Context) {
-	fileID := c.Param("file_id")
-	var req struct{ Name string }
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "Invalid request"})
+	fileID := sanitizeID(c.Param("file_id"))
+	if fileID == "" {
+		respondError(c, 400, "Invalid file ID")
 		return
 	}
 
-	result := db.Model(&File{}).Where("id =?", fileID).Update("name", req.Name)
-	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, Response{Code: 500})
+	var req struct {
+		Name string `json:"name"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, 400, "Invalid request body")
 		return
 	}
 
-	c.JSON(http.StatusOK, Response{Code: 0})
+	if err := db.Model(&File{}).Where("id = ?", fileID).Update("name", req.Name).Error; err != nil {
+		respondError(c, 500, "Failed to update filename")
+		return
+	}
+
+	c.JSON(200, Response{Code: 0})
 }
 
-// 获取文件版本列表
-func handleGetVersions(c *gin.Context) {
-	fileID := c.Param("file_id")
+// GET /v3/3rd/files/:file_id/versions
+func handleListVersions(c *gin.Context) {
+	fileID := sanitizeID(c.Param("file_id"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 
 	var versions []FileVersion
-	result := db.Where("id =?", fileID).
+	if err := db.Where("id = ?", fileID).
 		Order("version DESC").
 		Offset(offset).
 		Limit(limit).
-		Find(&versions)
-
-	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, Response{Code: 500})
+		Find(&versions).Error; err != nil {
+		respondError(c, 500, "Database error")
 		return
 	}
 
-	c.JSON(http.StatusOK, Response{Code: 0, Data: versions})
+	c.JSON(200, Response{
+		Code: 0,
+		Data: versions,
+	})
 }
 
-// 获取指定版本
+// GET /v3/3rd/files/:file_id/versions/:version
 func handleGetVersion(c *gin.Context) {
-	fileID := c.Param("file_id")
-	versionStr := c.Param("version")
-	version, err := strconv.Atoi(versionStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "Invalid version"})
+	fileID := sanitizeID(c.Param("file_id"))
+	version, err := strconv.Atoi(c.Param("version"))
+	if err != nil || version <= 0 {
+		respondError(c, 400, "Invalid version number")
 		return
 	}
 
 	var versionData FileVersion
-	result := db.Where("id =? AND version =?", fileID, version).First(&versionData)
-	if result.Error != nil {
-		c.JSON(http.StatusNotFound, Response{Code: 404})
+	if err := db.Where("id = ? AND version = ?", fileID, version).First(&versionData).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			respondError(c, 404, "Version not found")
+		} else {
+			respondError(c, 500, "Database error")
+		}
 		return
 	}
 
-	c.JSON(http.StatusOK, Response{Code: 0, Data: versionData})
-}
-
-// 获取版本下载地址
-func handleGetVersionDownload(c *gin.Context) {
-	fileID := c.Param("file_id")
-	versionStr := c.Param("version")
-	c.JSON(http.StatusOK, Response{
+	c.JSON(200, Response{
 		Code: 0,
-		Data: map[string]string{
-			"url": fmt.Sprintf("http://storage.example.com/files/%s/versions/%s", fileID, versionStr),
-		},
+		Data: versionData,
 	})
 }
 
-// 获取水印配置
+// GET /v3/3rd/files/:file_id/watermark
 func handleGetWatermark(c *gin.Context) {
-	fileID := c.Param("file_id")
-	var watermark Watermark
-
-	// 使用 fileID 查询水印配置
-	result := db.Where("file_id = ?", fileID).First(&watermark)
-	if result.Error != nil {
-		c.JSON(http.StatusOK, Response{
-			Code: 0,
-			Data: gin.H{"type": 0}, // 默认无水印
-		})
+	fileID := sanitizeID(c.Param("file_id"))
+	if fileID == "" {
+		respondError(c, 400, "Invalid file ID")
 		return
 	}
-	c.JSON(http.StatusOK, Response{Code: 0, Data: watermark})
+
+	var watermark Watermark
+	if err := db.Where("file_id = ?", fileID).First(&watermark).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(200, Response{
+				Code: 0,
+				Data: map[string]interface{}{"type": 0},
+			})
+		} else {
+			respondError(c, 500, "Database error")
+		}
+		return
+	}
+
+	c.JSON(200, Response{
+		Code: 0,
+		Data: watermark,
+	})
 }
 
-// 上传附件
-func handleUploadAttachment(c *gin.Context) {
+// PUT /v3/3rd/object/:key
+func handleUploadObject(c *gin.Context) {
 	key := c.Param("key")
 	data, err := c.GetRawData()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "Invalid data"})
+		respondError(c, 400, "Failed to read object data")
 		return
 	}
+
+	// 计算MD5校验和
+	hash := md5.Sum(data)
+	digest := hex.EncodeToString(hash[:])
 
 	attachment := Attachment{
 		Key:       key,
 		Data:      data,
 		CreatedAt: time.Now().Unix(),
 	}
-	result := db.Create(&attachment)
-	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, Response{Code: 500})
+
+	if err := db.Create(&attachment).Error; err != nil {
+		respondError(c, 500, "Failed to store object")
 		return
 	}
 
-	c.JSON(http.StatusOK, Response{Code: 0})
-}
-
-// 获取附件下载地址
-func handleGetAttachmentURL(c *gin.Context) {
-	key := c.Param("key")
-	c.JSON(http.StatusOK, Response{
+	c.JSON(200, Response{
 		Code: 0,
 		Data: map[string]string{
-			"url": fmt.Sprintf("http://storage.example.com/object/%s", key),
+			"digest": digest,
 		},
 	})
 }
 
-// 复制附件
-func handleCopyAttachment(c *gin.Context) {
+// GET /v3/3rd/object/:key/url
+func handleGetObjectURL(c *gin.Context) {
+	key := c.Param("key")
+	c.JSON(200, Response{
+		Code: 0,
+		Data: map[string]string{
+			"url": fmt.Sprintf("%s/objects/%s", storageBaseURL, key),
+		},
+	})
+}
+
+// POST /v3/3rd/object/copy
+func handleCopyObject(c *gin.Context) {
 	var req struct {
 		KeyDict map[string]string `json:"key_dict"`
 	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "Invalid request"})
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, 400, "Invalid request body")
 		return
 	}
 
-	for srcKey, dstKey := range req.KeyDict {
-		var attachment Attachment
-		result := db.First(&attachment, "key =?", srcKey)
-		if result.Error != nil {
-			continue
-		}
+	// 使用事务处理复制操作
+	err := db.Transaction(func(tx *gorm.DB) error {
+		for srcKey, dstKey := range req.KeyDict {
+			var src Attachment
+			if err := tx.Where("key = ?", srcKey).First(&src).Error; err != nil {
+				return fmt.Errorf("source object %s not found", srcKey)
+			}
 
-		newAttachment := Attachment{
-			Key:       dstKey,
-			Data:      attachment.Data,
-			CreatedAt: time.Now().Unix(),
+			dst := Attachment{
+				Key:       dstKey,
+				Data:      src.Data,
+				CreatedAt: time.Now().Unix(),
+			}
+
+			if err := tx.Create(&dst).Error; err != nil {
+				return err
+			}
 		}
-		db.Create(&newAttachment)
+		return nil
+	})
+
+	if err != nil {
+		respondError(c, 500, "Failed to copy objects: "+err.Error())
+		return
 	}
 
-	c.JSON(http.StatusOK, Response{Code: 0})
+	c.JSON(200, Response{Code: 0})
+}
+
+// ---------------------------
+// 工具函数
+// ---------------------------
+func sanitizeID(id string) string {
+	return strings.TrimSpace(id)
+}
+
+func respondError(c *gin.Context, code int, message string) {
+	c.JSON(200, Response{
+		Code:    code,
+		Message: message,
+	})
 }
 
 // ---------------------------
@@ -394,72 +512,115 @@ func handleCopyAttachment(c *gin.Context) {
 func main() {
 	// 初始化数据库
 	if err := initDB(); err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
 	// 初始化测试数据
-	initTestData()
+	if err := initTestData(); err != nil {
+		log.Fatalf("Test data initialization failed: %v", err)
+	}
 
-	// 初始化Gin
+	// 配置Gin路由
 	r := gin.Default()
+	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
+		return fmt.Sprintf("[%s] %s %s %d %s\n",
+			param.TimeStamp.Format(time.RFC3339),
+			param.Method,
+			param.Path,
+			param.StatusCode,
+			param.ErrorMessage,
+		)
+	}))
 
-	// 中间件
-	r.Use(func(c *gin.Context) {
-		c.Set("db", db)
-		c.Next()
-	})
+	// 注册所有回调接口
+	registerRoutes(r)
 
-	// 路由设置
-	r.GET("/v3/3rd/files/:file_id", handleGetFileInfo)
+	// 启动服务
+	log.Println("Starting server on :8080")
+	if err := r.Run(":8080"); err != nil {
+		log.Fatalf("Server startup failed: %v", err)
+	}
+}
+
+func registerRoutes(r *gin.Engine) {
+	// 文件相关
+	r.GET("/v3/3rd/files/:file_id", handleGetFile)
 	r.GET("/v3/3rd/files/:file_id/download", handleGetDownloadURL)
 	r.GET("/v3/3rd/files/:file_id/permission", handleGetPermissions)
+
+	// 三阶段保存
 	r.GET("/v3/3rd/files/:file_id/upload/prepare", handlePrepareUpload)
 	r.POST("/v3/3rd/files/:file_id/upload/address", handleGetUploadAddress)
 	r.POST("/v3/3rd/files/:file_id/upload/complete", handleUploadComplete)
-	r.GET("/v3/3rd/users", handleGetUsers)
-	r.PUT("/v3/3rd/files/:file_id/name", handleRenameFile)
-	r.GET("/v3/3rd/files/:file_id/versions", handleGetVersions)
-	r.GET("/v3/3rd/files/:file_id/versions/:version", handleGetVersion)
-	r.GET("/v3/3rd/files/:file_id/versions/:version/download", handleGetVersionDownload)
-	r.GET("/v3/3rd/files/:file_id/watermark", handleGetWatermark)
-	r.PUT("/v3/3rd/object/:key", handleUploadAttachment)
-	r.GET("/v3/3rd/object/:key/url", handleGetAttachmentURL)
-	r.POST("/v3/3rd/object/copy", handleCopyAttachment)
 
-	// 启动服务
-	log.Println("Server started on :8080")
-	log.Fatal(r.Run(":8080"))
+	// 用户相关
+	r.GET("/v3/3rd/users", handleGetUsers)
+
+	// 文件操作
+	r.PUT("/v3/3rd/files/:file_id/name", handleRenameFile)
+	r.GET("/v3/3rd/files/:file_id/versions", handleListVersions)
+	r.GET("/v3/3rd/files/:file_id/versions/:version", handleGetVersion)
+	r.GET("/v3/3rd/files/:file_id/versions/:version/download", handleGetDownloadURL)
+
+	// 水印配置
+	r.GET("/v3/3rd/files/:file_id/watermark", handleGetWatermark)
+
+	// 附件处理
+	r.PUT("/v3/3rd/object/:key", handleUploadObject)
+	r.GET("/v3/3rd/object/:key/url", handleGetObjectURL)
+	r.POST("/v3/3rd/object/copy", handleCopyObject)
 }
 
 // ---------------------------
-// 测试数据初始化
+// 测试数据初始化（带错误处理）
 // ---------------------------
-func initTestData() {
-	// 初始化用户
-	db.Create(&User{
-		ID:        "user1",
-		Name:      "Admin",
-		AvatarURL: "https://example.com/avatar.jpg",
-	})
+func initTestData() error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		// 初始化用户
+		if err := tx.Create(&User{
+			ID:        "user1",
+			Name:      "Admin",
+			AvatarURL: "https://example.com/avatar.jpg",
+		}).Error; err != nil {
+			return err
+		}
 
-	// 初始化文件
-	db.Create(&File{
-		ID:         "file123",
-		Name:       "测试文档.docx",
-		Version:    1,
-		Size:       1024,
-		CreateTime: time.Now().Unix(),
-		ModifyTime: time.Now().Unix(),
-		CreatorID:  "user1",
-		ModifierID: "user1",
-	})
+		// 初始化主文件
+		now := time.Now().Unix()
+		file := File{
+			ID:         "file123",
+			Name:       "测试文档.docx",
+			Version:    1,
+			Size:       1024,
+			CreateTime: now,
+			ModifyTime: now,
+			CreatorID:  "user1",
+			ModifierID: "user1",
+		}
+		if err := tx.Create(&file).Error; err != nil {
+			return err
+		}
 
-	// 初始化水印配置
-	db.Create(&Watermark{
-		FileID:     "file123",
-		Type:       1,
-		Value:      "Confidential",
-		Horizontal: 50,
-		Vertical:   100,
+		// 初始化水印
+		if err := tx.Create(&Watermark{
+			FileID:     "file123",
+			Type:       1,
+			Value:      "Confidential",
+			Horizontal: 50,
+			Vertical:   100,
+		}).Error; err != nil {
+			return err
+		}
+
+		// 初始化示例附件
+		if err := tx.Create(&Attachment{
+			Key:       "sample_key",
+			Data:      []byte("sample content"),
+			CreatedAt: now,
+		}).Error; err != nil {
+			return err
+		}
+
+		return nil
 	})
 }
