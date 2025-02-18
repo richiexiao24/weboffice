@@ -1,0 +1,17 @@
+# 忽略编译产物
+/bin/
+/pkg/
+
+# 忽略IDE配置
+.vscode/
+.idea/
+
+# 忽略本地存储
+/storage/*
+
+# 忽略依赖文件
+go.sum
+
+# 忽略环境文件
+.env
+*.local
