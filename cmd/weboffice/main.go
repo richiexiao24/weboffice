@@ -9,12 +9,18 @@ import (
 
 	"weboffice/internal/config"
 	"weboffice/internal/database"
+	"weboffice/internal/handlers"
 	"weboffice/internal/routes"
+	"weboffice/internal/storage"
 )
 
 func main() {
 	// 加载配置
 	cfg := config.LoadConfig()
+
+	// 初始化存储系统（正确方式）
+	fileStorage := storage.NewStorage(cfg.StoragePath)
+	handlers.InitFileStorage(fileStorage) // 传递存储实例而非配置
 
 	// 初始化数据库
 	if err := database.InitDB(cfg.DB); err != nil {
@@ -28,6 +34,7 @@ func main() {
 
 	// 创建Gin实例
 	r := gin.Default()
+	r.MaxMultipartMemory = 256 << 20 // 256MB内存缓冲，超过部分写入临时文件
 	configureLogger(r)
 
 	// 注册路由
